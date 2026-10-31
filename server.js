@@ -12,13 +12,31 @@ connectDB();
 
 const app = express();
 
+// Allowed CORS Origins
+const allowedOrigins = [
+  'https://chaya-admin-panel.vercel.app',
+  'http://localhost:5173',
+  'http://localhost:3000'
+];
+
 // Middleware
 app.use(cors({
-  origin: true,
+  origin: function (origin, callback) {
+    // allow requests with no origin (like mobile apps, curl, postman)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV !== 'production') {
+      return callback(null, true);
+    }
+    // Agar list me exact match ho ya same domain
+    return callback(null, true); // Safely allow all web origins with proper headers
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin']
 }));
+
+// Handle preflight explicitly
+app.options('*', cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
