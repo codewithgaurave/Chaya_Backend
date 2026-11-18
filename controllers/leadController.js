@@ -231,70 +231,139 @@ exports.bulkImportLeads = async (req, res) => {
 
     let importedCount = 0;
     let duplicateCount = 0;
+    let failedCount = 0;
     const importedLeads = [];
     const duplicates = [];
+    const failedRecords = [];
 
-    for (const item of leads) {
-      if (!item.candidateName || !item.phone) {
+    const seenInBatchPhones = new Set();
+
+    for (let index = 0; index < leads.length; index++) {
+      const item = leads[index];
+      const rowNumber = item.rowNumber || (index + 1);
+      const name = item.candidateName ? String(item.candidateName).trim() : '';
+      let rawPhone = item.phone ? String(item.phone).trim() : '';
+      const cleanPhone = rawPhone.replace(/[^0-9]/g, '').slice(-10);
+
+      // Validation 1: Candidate Name Required
+      if (!name) {
+        failedCount++;
+        failedRecords.push({
+          row: rowNumber,
+          candidateName: name || 'N/A',
+          phone: rawPhone || 'N/A',
+          trade: item.trade || 'N/A',
+          reason: 'Candidate Name is required/empty'
+        });
         continue;
       }
 
-      const phoneClean = String(item.phone).trim();
-      const existing = await Lead.findOne({ phone: phoneClean });
+      // Validation 2: Valid 10-digit Phone Required
+      if (!cleanPhone || cleanPhone.length < 10) {
+        failedCount++;
+        failedRecords.push({
+          row: rowNumber,
+          candidateName: name,
+          phone: rawPhone || 'Empty',
+          trade: item.trade || 'N/A',
+          reason: 'Invalid phone number (must be 10 digits)'
+        });
+        continue;
+      }
 
+      // Validation 3: Duplicate Phone within the current Excel file
+      if (seenInBatchPhones.has(cleanPhone)) {
+        duplicateCount++;
+        duplicates.push({ row: rowNumber, name, phone: cleanPhone, existingId: 'In-batch duplicate' });
+        failedCount++;
+        failedRecords.push({
+          row: rowNumber,
+          candidateName: name,
+          phone: cleanPhone,
+          trade: item.trade || 'N/A',
+          reason: 'Duplicate phone number found in the same file'
+        });
+        continue;
+      }
+      seenInBatchPhones.add(cleanPhone);
+
+      // Validation 4: Existing Phone in MongoDB
+      const existing = await Lead.findOne({ phone: cleanPhone });
       if (existing) {
         duplicateCount++;
-        duplicates.push({ name: item.candidateName, phone: phoneClean, existingId: existing.leadId });
+        duplicates.push({ row: rowNumber, name, phone: cleanPhone, existingId: existing.leadId });
         if (skipDuplicates) {
-          continue; // Skip duplicate phone
+          failedCount++;
+          failedRecords.push({
+            row: rowNumber,
+            candidateName: name,
+            phone: cleanPhone,
+            trade: item.trade || 'N/A',
+            reason: `Phone number already exists in CRM (Lead ID: #${existing.leadId})`
+          });
+          continue;
         }
       }
 
-      const leadIdStr = await generateLeadId();
-      const isPassportHolder = item.passportNumber 
-        ? 'YES' 
-        : (item.hasPassport === 'Yes' || item.hasPassport === 'YES' ? 'YES' : 'NOT_CONFIRMED');
+      try {
+        const leadIdStr = await generateLeadId();
+        const isPassportHolder = item.passportNumber 
+          ? 'YES' 
+          : (item.hasPassport === 'Yes' || item.hasPassport === 'YES' || item.isPassportHolder === 'YES' ? 'YES' : 'NOT_CONFIRMED');
 
-      const lead = await Lead.create({
-        leadId: leadIdStr,
-        source: source ? source.toUpperCase().replace(/\s+/g, '_') : (item.source || 'EXCEL'),
-        candidateName: item.candidateName.trim(),
-        phone: phoneClean,
-        email: item.email || '',
-        city: item.city || item.state || '',
-        state: item.state || '',
-        trade: item.trade || '',
-        passportNumber: item.passportNumber || null,
-        isPassportHolder,
-        currentStage: 'UNASSIGNED',
-        applicationForm: {
-          trade: item.trade || '',
-          experienceYears: item.experience || item.experienceYears || '',
-          preferredCountries: item.country ? [item.country] : [],
-          expectedSalary: item.expectedSalary || '',
-          city: item.city || '',
-          state: item.state || ''
-        }
-      });
+        const lead = await Lead.create({
+          leadId: leadIdStr,
+          source: source ? source.toUpperCase().replace(/\s+/g, '_') : (item.source || 'EXCEL'),
+          candidateName: name,
+          phone: cleanPhone,
+          email: item.email || '',
+          city: item.city || item.state || '',
+          state: item.state || '',
+          trade: item.trade || 'General Worker',
+          passportNumber: item.passportNumber || null,
+          isPassportHolder,
+          currentStage: 'UNASSIGNED',
+          applicationForm: {
+            trade: item.trade || 'General Worker',
+            experienceYears: item.experience || item.experienceYears || '',
+            preferredCountries: item.country ? [item.country] : [],
+            expectedSalary: item.expectedSalary || '',
+            city: item.city || '',
+            state: item.state || ''
+          }
+        });
 
-      await logLeadHistory({
-        lead,
-        performedBy: req.user,
-        actionType: 'LEAD_CREATED',
-        toStage: 'UNASSIGNED',
-        remarks: `Bulk imported via ${lead.source} by ${req.user.name}`
-      });
+        await logLeadHistory({
+          lead,
+          performedBy: req.user,
+          actionType: 'LEAD_CREATED',
+          toStage: 'UNASSIGNED',
+          remarks: `Bulk imported via ${lead.source} by ${req.user.name}`
+        });
 
-      importedLeads.push(lead);
-      importedCount++;
+        importedLeads.push(lead);
+        importedCount++;
+      } catch (insertErr) {
+        failedCount++;
+        failedRecords.push({
+          row: rowNumber,
+          candidateName: name,
+          phone: cleanPhone,
+          trade: item.trade || 'N/A',
+          reason: insertErr.message || 'Database insert error'
+        });
+      }
     }
 
     res.json({
       success: true,
-      message: `Bulk import completed: ${importedCount} imported, ${duplicateCount} duplicates ${skipDuplicates ? 'skipped' : 'found'}`,
+      message: `Bulk import completed: ${importedCount} successfully imported, ${failedCount} failed (${duplicateCount} duplicates skipped)`,
+      totalRows: leads.length,
       importedCount,
+      failedCount,
       duplicateCount,
       duplicates,
+      failedRecords,
       data: importedLeads
     });
   } catch (error) {
