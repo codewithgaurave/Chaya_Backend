@@ -2547,6 +2547,145 @@ exports.submitMedicalResult = async (req, res) => {
   }
 };
 
+// @desc    Bulk Update GAMCA Medical Fitness Results via Excel Sheet Upload
+// @route   POST /api/leads/bulk-medical-results
+// @access  Private (Medical Team, Admin, Staff Head)
+exports.bulkUpdateMedicalResults = async (req, res) => {
+  try {
+    const { results } = req.body;
+    if (!results || !Array.isArray(results) || results.length === 0) {
+      return res.status(400).json({ success: false, message: 'Please provide an array of medical results' });
+    }
+
+    let updatedCount = 0;
+    let failedCount = 0;
+    const failedRecords = [];
+    const updatedRecords = [];
+
+    for (let i = 0; i < results.length; i++) {
+      const row = results[i];
+      const rowNumber = row.rowNumber || (i + 1);
+      const identifier = String(row.leadId || row.phone || row.passportNumber || '').trim();
+      const statusRaw = String(row.status || '').trim().toUpperCase();
+
+      if (!identifier) {
+        failedCount++;
+        failedRecords.push({
+          row: rowNumber,
+          identifier: 'Empty',
+          candidateName: row.candidateName || 'N/A',
+          reason: 'Missing Lead ID, Phone number, or Passport Number'
+        });
+        continue;
+      }
+
+      const status = statusRaw.includes('FIT') && !statusRaw.includes('UNFIT') 
+        ? 'FIT' 
+        : statusRaw.includes('UNFIT') 
+          ? 'UNFIT' 
+          : 'PENDING';
+
+      if (!['FIT', 'UNFIT', 'PENDING'].includes(status)) {
+        failedCount++;
+        failedRecords.push({
+          row: rowNumber,
+          identifier,
+          candidateName: row.candidateName || 'N/A',
+          reason: `Invalid Status "${row.status}". Must be FIT, UNFIT, or PENDING`
+        });
+        continue;
+      }
+
+      // Find candidate by leadId, phone, or passport
+      const cleanPhone = identifier.replace(/[^0-9]/g, '').slice(-10);
+      let lead = await Lead.findOne({
+        $or: [
+          { leadId: identifier },
+          ...(cleanPhone ? [{ phone: cleanPhone }] : []),
+          { passportNumber: identifier }
+        ]
+      });
+
+      if (!lead) {
+        failedCount++;
+        failedRecords.push({
+          row: rowNumber,
+          identifier,
+          candidateName: row.candidateName || 'N/A',
+          reason: `Candidate not found with Identifier: ${identifier}`
+        });
+        continue;
+      }
+
+      try {
+        const prevStage = lead.currentStage;
+        if (!lead.medicalDetails) lead.medicalDetails = {};
+
+        lead.medicalDetails.status = status;
+        if (row.center) lead.medicalDetails.center = String(row.center).trim();
+        if (row.slipNo) lead.medicalDetails.slipNo = String(row.slipNo).trim();
+        lead.medicalDetails.validity = status === 'FIT' ? (row.validity || '12 Months') : 'None';
+        lead.medicalDetails.remarks = row.remarks || lead.medicalDetails.remarks || 'Bulk Excel Medical Result Updated';
+        lead.medicalDetails.updatedAt = new Date();
+
+        if (status === 'FIT') {
+          lead.currentStage = 'STAFF_HEAD_HANDLING';
+          lead.isHold = false;
+          lead.holdReason = '';
+          await logLeadHistory({
+            lead,
+            performedBy: req.user,
+            actionType: 'MEDICAL_RESULT',
+            fromStage: prevStage,
+            toStage: 'STAFF_HEAD_HANDLING',
+            remarks: `Bulk Excel GAMCA Medical: FIT. Center: ${lead.medicalDetails.center || 'Lab'}, Remarks: ${lead.medicalDetails.remarks}`
+          });
+        } else if (status === 'UNFIT') {
+          lead.currentStage = 'REJECTED';
+          lead.isHold = true;
+          lead.holdReason = `GAMCA Medical Unfit: ${lead.medicalDetails.remarks}`;
+          await logLeadHistory({
+            lead,
+            performedBy: req.user,
+            actionType: 'MEDICAL_RESULT',
+            fromStage: prevStage,
+            toStage: 'REJECTED',
+            remarks: `Bulk Excel GAMCA Medical: UNFIT. Remarks: ${lead.medicalDetails.remarks}`
+          });
+        }
+
+        await lead.save();
+        updatedCount++;
+        updatedRecords.push({
+          leadId: lead.leadId,
+          candidateName: lead.candidateName,
+          status
+        });
+      } catch (err) {
+        failedCount++;
+        failedRecords.push({
+          row: rowNumber,
+          identifier,
+          candidateName: lead.candidateName,
+          reason: err.message || 'Database update error'
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Medical bulk update completed: ${updatedCount} successfully updated, ${failedCount} failed`,
+      totalRows: results.length,
+      updatedCount,
+      failedCount,
+      failedRecords,
+      data: updatedRecords
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // @desc    Send or Upload Medical Report PDF to candidate (Required before Advance Payment)
 // @route   POST /api/leads/:id/medical-report-send
 // @access  Private (Medical Team, Calling Staff, Staff Head, Admin)

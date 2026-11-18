@@ -21,6 +21,7 @@ const {
   checkInMedicalCandidate,
   saveMedicalTests,
   submitMedicalResult,
+  bulkUpdateMedicalResults,
   sendMedicalReportPdf,
   recordPaymentBooking,
   recordFinalPayment,
@@ -104,6 +105,7 @@ router.put('/:id/location-confirmation', protect, updateLocationConfirmation);
 router.put('/:id/interview-result', protect, authorize('ADMIN', 'INTERVIEW_PANEL', 'STAFF_HEAD'), submitInterviewResult);
 
 // 4. Medical & Payment Booking Routes (FRD Section 11 & 12)
+router.post('/bulk-medical-results', protect, authorize('MEDICAL_DEPT', 'ADMIN', 'STAFF_HEAD'), bulkUpdateMedicalResults);
 router.put('/:id/medical-schedule', protect, scheduleMedicalAppointment);
 router.put('/:id/medical-checkin', protect, checkInMedicalCandidate);
 router.put('/:id/medical-tests', protect, saveMedicalTests);
