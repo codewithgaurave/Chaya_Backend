@@ -52,6 +52,7 @@ const {
   getTransferOutbox,
   updateCompanyConfirmation,
   addBillBookTransaction,
+  bulkImportBillBookTransactions,
   verifyBillBookTransaction,
   rejectBillBookTransaction,
   addBillBookCharge,
@@ -147,6 +148,7 @@ router.post('/:id/confirm-receiving', protect, confirmReceivingTransfer);
 router.put('/:id/company-confirmation', protect, updateCompanyConfirmation);
 
 // 10. Bill Book & Financial Ledger (FRD Section 9)
+router.post('/billbook/bulk-transactions', protect, authorize('ACCOUNTS', 'ADMIN'), bulkImportBillBookTransactions);
 router.post('/:id/billbook/transaction', protect, addBillBookTransaction);
 router.put('/:id/billbook/transaction/:receiptNo/verify', protect, authorize('ACCOUNTS', 'ADMIN'), verifyBillBookTransaction);
 router.put('/:id/billbook/transaction/:receiptNo/reject', protect, authorize('ACCOUNTS', 'ADMIN'), rejectBillBookTransaction);

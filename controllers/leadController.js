@@ -5043,6 +5043,172 @@ exports.addBillBookCharge = async (req, res) => {
   }
 };
 
+// @desc    Bulk Import Bill Book Transactions (Advance / Medical / Service / Visa Payments) via Excel
+// @route   POST /api/leads/billbook/bulk-transactions
+// @access  Private (Accounts, Admin)
+exports.bulkImportBillBookTransactions = async (req, res) => {
+  try {
+    const { transactions } = req.body;
+    if (!transactions || !Array.isArray(transactions) || transactions.length === 0) {
+      return res.status(400).json({ success: false, message: 'Please provide an array of transactions to import' });
+    }
+
+    let importedCount = 0;
+    let failedCount = 0;
+    const failedRecords = [];
+    const importedRecords = [];
+
+    const isVerifier = ['ACCOUNTS', 'ADMIN'].includes((req.user?.role || '').toUpperCase());
+    const initialStatus = isVerifier ? 'VERIFIED' : 'PENDING_VERIFICATION';
+
+    for (let i = 0; i < transactions.length; i++) {
+      const row = transactions[i];
+      const rowNumber = row.rowNumber || (i + 1);
+      const identifier = String(row.leadId || row.phone || row.passportNumber || '').trim();
+      const numAmount = Number(row.amount);
+      const cleanPhone = identifier.replace(/[^0-9]/g, '').slice(-10);
+
+      // Validation 1: Identifier
+      if (!identifier) {
+        failedCount++;
+        failedRecords.push({
+          row: rowNumber,
+          identifier: 'Empty',
+          amount: row.amount || 0,
+          reason: 'Missing Lead ID, Mobile, or Passport Number'
+        });
+        continue;
+      }
+
+      // Validation 2: Amount
+      if (isNaN(numAmount) || numAmount <= 0) {
+        failedCount++;
+        failedRecords.push({
+          row: rowNumber,
+          identifier,
+          amount: row.amount || 0,
+          reason: 'Amount must be a valid positive number'
+        });
+        continue;
+      }
+
+      // Find Candidate
+      let lead = await Lead.findOne({
+        $or: [
+          { leadId: identifier },
+          ...(cleanPhone ? [{ phone: cleanPhone }] : []),
+          { passportNumber: identifier }
+        ]
+      });
+
+      if (!lead) {
+        failedCount++;
+        failedRecords.push({
+          row: rowNumber,
+          identifier,
+          amount: numAmount,
+          reason: `No candidate found matching identifier: ${identifier}`
+        });
+        continue;
+      }
+
+      try {
+        if (!lead.billBook) lead.billBook = {};
+        if (!lead.billBook.isLedgerOpen) {
+          lead.billBook.isLedgerOpen = true;
+          lead.billBook.openedAt = new Date();
+        }
+        if (!lead.billBook.transactions) lead.billBook.transactions = [];
+
+        // Check for duplicate Reference No in this candidate's ledger
+        const refNo = String(row.referenceNo || row.utr || '').trim();
+        if (refNo) {
+          const duplicateRef = lead.billBook.transactions.find(t => t.referenceNo && t.referenceNo.toLowerCase() === refNo.toLowerCase());
+          if (duplicateRef) {
+            failedCount++;
+            failedRecords.push({
+              row: rowNumber,
+              identifier,
+              amount: numAmount,
+              reason: `Transaction with Reference/UTR #${refNo} already exists in this candidate's ledger`
+            });
+            continue;
+          }
+        }
+
+        const headRaw = String(row.head || row.paymentType || 'ADVANCE').toUpperCase();
+        let head = 'ADVANCE';
+        if (headRaw.includes('MED')) head = 'MEDICAL_FEE';
+        else if (headRaw.includes('SERV')) head = 'SERVICE_CHARGE';
+        else if (headRaw.includes('VISA')) head = 'VISA_FEE';
+        else if (headRaw.includes('REFUND')) head = 'REFUND';
+
+        const isRefund = head === 'REFUND';
+        const receiptNo = String(row.receiptNo || '').trim() || `BB-${isRefund ? 'REF' : 'REC'}-${Math.floor(100000 + Math.random() * 900000)}`;
+
+        const newTx = {
+          receiptNo,
+          type: isRefund ? 'REFUND' : 'PAYMENT',
+          head,
+          amount: numAmount,
+          paymentMode: String(row.paymentMode || row.mode || 'BANK_TRANSFER').toUpperCase(),
+          referenceNo: refNo,
+          status: initialStatus,
+          receivedBy: req.user?.name || 'Accounts Bulk Upload',
+          verifiedBy: isVerifier ? (req.user?.name || 'Admin') : '',
+          verifiedAt: isVerifier ? new Date() : null,
+          remarks: row.remarks || 'Bulk Excel Ingested Payment',
+          date: row.date ? new Date(row.date) : new Date()
+        };
+
+        lead.billBook.transactions.push(newTx);
+        recalculateBillBookTotals(lead);
+
+        if (head === 'ADVANCE' && !isRefund) {
+          lead.currentStage = 'ACCOUNTS_COLLECTION';
+        }
+
+        await lead.save();
+
+        await logLeadHistory({
+          lead,
+          performedBy: req.user,
+          actionType: isRefund ? 'REFUND_RECORDED' : 'PAYMENT_RECORDED',
+          remarks: `Bulk Excel Payment of ₹${numAmount} (${head}) logged. Receipt #${receiptNo}, Ref: ${refNo || 'N/A'}. Status: ${initialStatus}`
+        });
+
+        importedCount++;
+        importedRecords.push({
+          leadId: lead.leadId,
+          candidateName: lead.candidateName,
+          amount: numAmount,
+          receiptNo
+        });
+      } catch (txErr) {
+        failedCount++;
+        failedRecords.push({
+          row: rowNumber,
+          identifier,
+          amount: numAmount,
+          reason: txErr.message || 'Database insert error'
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Bulk payment import completed: ${importedCount} successfully saved, ${failedCount} failed`,
+      totalRows: transactions.length,
+      importedCount,
+      failedCount,
+      failedRecords,
+      data: importedRecords
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // ─── 4. CONFIRMATIONS & RECORDINGS (FRD Section 8) ────────────────────────────
 // @desc    Save or update any of the 8 Confirmation PDFs and Audio/Video Recordings
 // @route   POST /api/leads/:id/confirmations
