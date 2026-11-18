@@ -3,6 +3,7 @@ const router = express.Router();
 const {
   registerAdmin,
   registerUser,
+  bulkRegisterUsers,
   loginUser,
   getUserProfile,
   updateUserProfile,
@@ -37,6 +38,7 @@ router.post('/login-history/terminate-stale', protect, authorize('ADMIN'), termi
 
 // ADMIN & STAFF HEAD User Management Routes
 router.post('/register', protect, authorize('ADMIN'), upload.single('avatar'), registerUser);
+router.post('/bulk-register', protect, authorize('ADMIN'), bulkRegisterUsers);
 router.get('/users', protect, authorize('ADMIN', 'STAFF_HEAD', 'DATA_CONTROLLER'), getAllUsers);
 router.put('/users/:id', protect, authorize('ADMIN'), upload.single('avatar'), updateUser);
 router.put('/users/:id/targets', protect, authorize('ADMIN', 'STAFF_HEAD'), updateUserTargets);

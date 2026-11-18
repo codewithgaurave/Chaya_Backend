@@ -109,6 +109,143 @@ exports.registerUser = async (req, res) => {
   }
 };
 
+// @desc    Bulk Register / Import Users from Excel/Spreadsheet
+// @route   POST /api/auth/bulk-register
+// @access  Private (Admin Only)
+exports.bulkRegisterUsers = async (req, res) => {
+  try {
+    const { users } = req.body;
+    if (!Array.isArray(users) || users.length === 0) {
+      return res.status(400).json({ success: false, message: 'Invalid or empty users array.' });
+    }
+
+    let createdCount = 0;
+    let failedCount = 0;
+    const failedRecords = [];
+    const createdUsers = [];
+
+    const VALID_ROLES = [
+      'ADMIN', 'DATA_CONTROLLER', 'STAFF_HEAD', 'CALLING_STAFF',
+      'INTERVIEW_PANEL', 'MEDICAL_DEPT', 'ACCOUNTS', 'PRE_VISA_MANAGER',
+      'VISA_MANAGER', 'VIVA_MANAGER'
+    ];
+
+    for (const item of users) {
+      const rowNum = item.rowNumber || (createdCount + failedCount + 1);
+      const name = (item.name || item.fullName || '').toString().trim();
+      const email = (item.email || '').toString().trim().toLowerCase();
+      const phone = (item.phone || item.mobile || '').toString().trim();
+      let role = (item.role || 'CALLING_STAFF').toString().trim().toUpperCase().replace(/[\s-]/g, '_');
+      const department = (item.department || '').toString().trim();
+      const password = (item.password || 'Chhaya@123').toString().trim();
+
+      if (!name) {
+        failedCount++;
+        failedRecords.push({
+          rowNumber: rowNum,
+          name: 'N/A',
+          email,
+          phone,
+          reason: 'Full Name is required.'
+        });
+        continue;
+      }
+
+      if (!email && !phone) {
+        failedCount++;
+        failedRecords.push({
+          rowNumber: rowNum,
+          name,
+          email,
+          phone,
+          reason: 'Either Email or Phone number is required for login.'
+        });
+        continue;
+      }
+
+      // Check role mapping
+      if (!VALID_ROLES.includes(role)) {
+        if (role.includes('CALL')) role = 'CALLING_STAFF';
+        else if (role.includes('HEAD')) role = 'STAFF_HEAD';
+        else if (role.includes('DATA')) role = 'DATA_CONTROLLER';
+        else if (role.includes('MED')) role = 'MEDICAL_DEPT';
+        else if (role.includes('ACC')) role = 'ACCOUNTS';
+        else if (role.includes('PRE')) role = 'PRE_VISA_MANAGER';
+        else if (role.includes('VISA')) role = 'VISA_MANAGER';
+        else if (role.includes('VIVA') || role.includes('PLACE')) role = 'VIVA_MANAGER';
+        else if (role.includes('INT')) role = 'INTERVIEW_PANEL';
+        else if (role.includes('ADM')) role = 'ADMIN';
+        else role = 'CALLING_STAFF';
+      }
+
+      // Check email uniqueness
+      if (email) {
+        const emailExists = await User.findOne({ email });
+        if (emailExists) {
+          failedCount++;
+          failedRecords.push({
+            rowNumber: rowNum,
+            name,
+            email,
+            phone,
+            reason: `Email "${email}" is already registered to ${emailExists.name}.`
+          });
+          continue;
+        }
+      }
+
+      // Check phone uniqueness
+      if (phone) {
+        const phoneExists = await User.findOne({ phone });
+        if (phoneExists) {
+          failedCount++;
+          failedRecords.push({
+            rowNumber: rowNum,
+            name,
+            email,
+            phone,
+            reason: `Phone "${phone}" is already registered to ${phoneExists.name}.`
+          });
+          continue;
+        }
+      }
+
+      // Create user
+      const user = await User.create({
+        name,
+        email: email || `${phone}@chhayainternational.com`,
+        phone,
+        password,
+        role,
+        department: department || 'Operations',
+        isActive: true
+      });
+
+      createdCount++;
+      createdUsers.push({
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        department: user.department
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      message: `Batch Staff Registration processed: ${createdCount} users created, ${failedCount} rejected.`,
+      totalRows: users.length,
+      createdCount,
+      failedCount,
+      failedRecords,
+      data: createdUsers
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // @desc    Auth user & get token
 // @route   POST /api/auth/login
 // @access  Public
