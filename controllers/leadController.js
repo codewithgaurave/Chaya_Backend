@@ -4055,6 +4055,143 @@ exports.updatePlacementDeployment = async (req, res) => {
   }
 };
 
+// @desc    Bulk Update Flight Tickets & Deployment Details via Excel/Spreadsheet
+// @route   POST /api/leads/placement/bulk-deployment
+// @access  Private (Admin / Viva / Placement Desk)
+exports.bulkUpdatePlacementDeployment = async (req, res) => {
+  try {
+    const { deployments } = req.body;
+    if (!Array.isArray(deployments) || deployments.length === 0) {
+      return res.status(400).json({ success: false, message: 'Invalid or empty deployments array.' });
+    }
+
+    let updatedCount = 0;
+    let failedCount = 0;
+    const failedRecords = [];
+    const updatedRecords = [];
+
+    for (const item of deployments) {
+      const rowNum = item.rowNumber || (updatedCount + failedCount + 1);
+      const identifier = (item.leadId || item.phone || item.passportNumber || item.candidateId || '').toString().trim();
+      const pnr = (item.pnr || item.pnrNumber || '').toString().trim();
+
+      if (!identifier) {
+        failedCount++;
+        failedRecords.push({
+          rowNumber: rowNum,
+          identifier: 'EMPTY',
+          candidateName: item.candidateName || 'N/A',
+          reason: 'Missing candidate identifier (Lead ID, Mobile or Passport Number).'
+        });
+        continue;
+      }
+
+      // Find matching candidate
+      let lead = null;
+      if (mongoose.Types.ObjectId.isValid(identifier)) {
+        lead = await Lead.findById(identifier);
+      }
+      if (!lead) {
+        lead = await Lead.findOne({
+          $or: [
+            { leadId: identifier },
+            { phone: identifier },
+            { passportNumber: identifier },
+            { 'applicationForm.passportNumber': identifier }
+          ]
+        });
+      }
+
+      if (!lead) {
+        failedCount++;
+        failedRecords.push({
+          rowNumber: rowNum,
+          identifier,
+          candidateName: item.candidateName || 'N/A',
+          reason: `No candidate found matching ID, Phone or Passport "${identifier}".`
+        });
+        continue;
+      }
+
+      if (!lead.placementDetails) lead.placementDetails = {};
+      if (!lead.placementDetails.deployment) lead.placementDetails.deployment = {};
+
+      const currentDep = lead.placementDetails.deployment || {};
+      const genDeployId = item.deployId || currentDep.deployId || `DEP-${Math.floor(800 + Math.random() * 199)}`;
+
+      const flightDateParsed = item.flightDate ? new Date(item.flightDate) : currentDep.flightDate;
+      const joiningDateParsed = item.joiningDate ? new Date(item.joiningDate) : currentDep.joiningDate;
+
+      // Status resolution
+      let determinedStatus = item.status || 'FLIGHT_BOOKED';
+      if (['FLIGHT_BOOKED', 'DEPARTED', 'JOINED_ON_SITE', 'PENDING_TICKET'].includes(determinedStatus.toUpperCase())) {
+        determinedStatus = determinedStatus.toUpperCase();
+      } else {
+        determinedStatus = 'FLIGHT_BOOKED';
+      }
+
+      lead.placementDetails.deployment = {
+        deployId: genDeployId,
+        company: item.company || currentDep.company || '',
+        country: item.country || currentDep.country || lead.country || '',
+        airline: item.airline || currentDep.airline || 'Commercial Airline',
+        flightNumber: item.flightNumber || currentDep.flightNumber || '',
+        pnr: pnr || currentDep.pnr || '',
+        sector: item.sector || currentDep.sector || '',
+        departureAirport: item.departureAirport || currentDep.departureAirport || '',
+        arrivalAirport: item.arrivalAirport || currentDep.arrivalAirport || '',
+        flightDate: flightDateParsed,
+        confirmedTicketDate: flightDateParsed,
+        flightTime: item.flightTime || currentDep.flightTime || '',
+        joiningDate: joiningDateParsed,
+        poeStatus: item.poeStatus || currentDep.poeStatus || 'POE Cleared',
+        baggage: item.baggage || currentDep.baggage || '30 KG Check-in + 7 KG Cabin',
+        pickupOfficer: item.pickupOfficer || currentDep.pickupOfficer || '',
+        campLocation: item.campLocation || currentDep.campLocation || '',
+        status: determinedStatus,
+        notes: item.notes || currentDep.notes || 'Bulk imported via Flight Manifest Excel'
+      };
+
+      if (determinedStatus === 'DEPARTED' || determinedStatus === 'JOINED_ON_SITE') {
+        lead.currentStage = 'COMPLETED';
+      } else if (lead.currentStage !== 'COMPLETED') {
+        lead.currentStage = 'VIVA_PLACEMENT';
+      }
+
+      await lead.save();
+
+      await logLeadHistory({
+        lead,
+        performedBy: req.user,
+        actionType: 'BULK_FLIGHT_TICKET_IMPORTED',
+        remarks: `Flight Ticket bulk imported: Airline: ${item.airline || 'N/A'}, Flight: ${item.flightNumber || 'N/A'}, PNR: ${pnr || 'N/A'}, Date: ${item.flightDate || 'N/A'}`
+      });
+
+      updatedCount++;
+      updatedRecords.push({
+        leadId: lead.leadId || lead._id,
+        candidateName: lead.candidateName,
+        pnr: pnr,
+        flightNumber: item.flightNumber,
+        flightDate: item.flightDate,
+        status: determinedStatus
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Batch Flight Manifest processed: ${updatedCount} tickets booked/updated, ${failedCount} failed.`,
+      totalRows: deployments.length,
+      updatedCount,
+      failedCount,
+      failedRecords,
+      data: updatedRecords
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // ─── 1. TWO-PARTY FILE TRANSFER PROTOCOL (FRD Section 1 & 7) ───────────────────
 // @desc    Initiate transfer request to another staff/department
 // @route   POST /api/leads/:id/request-transfer

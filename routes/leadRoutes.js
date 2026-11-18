@@ -39,6 +39,7 @@ const {
   submitPlacementVivaResult,
   issuePlacementOfferLetter,
   updatePlacementDeployment,
+  bulkUpdatePlacementDeployment,
   getLeads,
   getAdminDashboardSummary,
   adminLeadOverride,
@@ -131,6 +132,7 @@ router.put('/:id/visa-documents', protect, verifyVisaDocuments);
 router.put('/:id/visa-tracking', protect, updateVisaTracking);
 
 // 7. Viva & Placement Routes (FRD Step 17 - 20)
+router.post('/placement/bulk-deployment', protect, authorize('ADMIN', 'STAFF_HEAD', 'VISA_MANAGER'), bulkUpdatePlacementDeployment);
 router.put('/:id/placement-viva-schedule', protect, schedulePlacementViva);
 router.put('/:id/placement-viva-result', protect, submitPlacementVivaResult);
 router.put('/:id/placement-offer-letter', protect, issuePlacementOfferLetter);
