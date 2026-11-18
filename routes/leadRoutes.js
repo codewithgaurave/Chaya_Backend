@@ -32,6 +32,7 @@ const {
   confirmVisaDelay,
   applyVisa,
   updateVisaStatus,
+  bulkUpdateVisaResults,
   verifyVisaDocuments,
   updateVisaTracking,
   schedulePlacementViva,
@@ -122,6 +123,7 @@ router.put('/:id/pre-viva-evaluate', protect, evaluatePreVivaCandidate);
 router.put('/:id/pre-viva-delay', protect, confirmVisaDelay);
 
 // 6. Visa Processing Routes (FRD Step 16)
+router.post('/bulk-visa-updates', protect, authorize('VISA_MANAGER', 'ADMIN', 'STAFF_HEAD'), bulkUpdateVisaResults);
 router.put('/:id/visa-apply', protect, applyVisa);
 router.put('/:id/visa-status', protect, updateVisaStatus);
 router.put('/:id/visa-documents', protect, verifyVisaDocuments);

@@ -3557,6 +3557,157 @@ exports.updateVisaStatus = async (req, res) => {
   }
 };
 
+// @desc    Bulk Update Visa Tracking & Stamping Results via Excel Sheet Upload
+// @route   POST /api/leads/bulk-visa-updates
+// @access  Private (Visa Manager, Admin)
+exports.bulkUpdateVisaResults = async (req, res) => {
+  try {
+    const { updates } = req.body;
+    if (!updates || !Array.isArray(updates) || updates.length === 0) {
+      return res.status(400).json({ success: false, message: 'Please provide an array of visa updates' });
+    }
+
+    let updatedCount = 0;
+    let failedCount = 0;
+    const failedRecords = [];
+    const updatedRecords = [];
+
+    for (let i = 0; i < updates.length; i++) {
+      const row = updates[i];
+      const rowNumber = row.rowNumber || (i + 1);
+      const identifier = String(row.leadId || row.phone || row.passportNumber || '').trim();
+      const statusRaw = String(row.status || '').trim().toUpperCase();
+
+      if (!identifier) {
+        failedCount++;
+        failedRecords.push({
+          row: rowNumber,
+          identifier: 'Empty',
+          candidateName: row.candidateName || 'N/A',
+          reason: 'Missing Lead ID, Mobile number, or Passport Number'
+        });
+        continue;
+      }
+
+      let status = 'SUBMITTED';
+      if (statusRaw.includes('APPROV') || statusRaw.includes('STAMP') || statusRaw.includes('ISSUE')) {
+        status = 'APPROVED';
+      } else if (statusRaw.includes('REJECT') || statusRaw.includes('DENY')) {
+        status = 'REJECTED';
+      } else if (statusRaw.includes('DELAY') || statusRaw.includes('HOLD')) {
+        status = 'DELAYED';
+      } else if (statusRaw.includes('PROCESS')) {
+        status = 'PROCESSING';
+      }
+
+      const cleanPhone = identifier.replace(/[^0-9]/g, '').slice(-10);
+      let lead = await Lead.findOne({
+        $or: [
+          { leadId: identifier },
+          ...(cleanPhone ? [{ phone: cleanPhone }] : []),
+          { passportNumber: identifier },
+          { 'visaDetails.applicationNumber': identifier },
+          { 'visaDetails.visaNumber': identifier }
+        ]
+      });
+
+      if (!lead) {
+        failedCount++;
+        failedRecords.push({
+          row: rowNumber,
+          identifier,
+          candidateName: row.candidateName || 'N/A',
+          reason: `No candidate found matching ID/Phone/Passport: ${identifier}`
+        });
+        continue;
+      }
+
+      try {
+        lead.visaDetails = lead.visaDetails || {};
+        lead.visaDetails.status = status;
+        if (row.visaNumber) lead.visaDetails.visaNumber = String(row.visaNumber).trim();
+        if (row.applicationNumber) lead.visaDetails.applicationNumber = String(row.applicationNumber).trim();
+        if (row.remarks) lead.visaDetails.remarks = String(row.remarks).trim();
+
+        lead.visaDetails.trackingHistory = lead.visaDetails.trackingHistory || [];
+
+        if (status === 'APPROVED') {
+          lead.visaDetails.trackingStage = 5;
+          lead.visaDetails.stampedDate = row.stampedDate ? new Date(row.stampedDate) : new Date();
+          lead.visaDetails.expiryDate = row.expiryDate ? new Date(row.expiryDate) : null;
+          lead.visaDetails.notifiedToStaffHead = true;
+          lead.currentStage = 'VIVA_PLACEMENT';
+
+          lead.visaDetails.trackingHistory.push({
+            date: new Date(),
+            stage: 5,
+            event: `Bulk Excel Visa Approved & Stamped! Visa No: ${lead.visaDetails.visaNumber || 'N/A'}. Forwarded to Viva/Placement Desk`,
+            user: req.user.name
+          });
+
+          await logLeadHistory({
+            lead,
+            performedBy: req.user,
+            actionType: 'VISA_RECEIVED_NOTIFIED_STAFF_HEAD',
+            remarks: `Bulk Excel Update: Visa Approved (Visa No: ${lead.visaDetails.visaNumber || 'N/A'}). Transferred to Viva/Placement Desk.`
+          });
+        } else if (status === 'REJECTED') {
+          lead.currentStage = 'REJECTED';
+          lead.visaDetails.trackingHistory.push({
+            date: new Date(),
+            stage: 2,
+            event: `Bulk Excel Visa Rejected: ${lead.visaDetails.remarks || 'Consular denial'}`,
+            user: req.user.name
+          });
+
+          await logLeadHistory({
+            lead,
+            performedBy: req.user,
+            actionType: 'VISA_STATUS_UPDATED',
+            remarks: `Bulk Excel Visa Rejected: ${lead.visaDetails.remarks || ''}`
+          });
+        } else {
+          lead.visaDetails.trackingHistory.push({
+            date: new Date(),
+            stage: 2,
+            event: `Bulk Excel Visa Status: ${status}`,
+            user: req.user.name
+          });
+        }
+
+        await lead.save();
+        updatedCount++;
+        updatedRecords.push({
+          leadId: lead.leadId,
+          candidateName: lead.candidateName,
+          status,
+          visaNumber: lead.visaDetails.visaNumber
+        });
+      } catch (saveErr) {
+        failedCount++;
+        failedRecords.push({
+          row: rowNumber,
+          identifier,
+          candidateName: lead.candidateName,
+          reason: saveErr.message || 'Database error during update'
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Visa bulk update completed: ${updatedCount} successfully updated, ${failedCount} failed`,
+      totalRows: updates.length,
+      updatedCount,
+      failedCount,
+      failedRecords,
+      data: updatedRecords
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // @desc    Verify Candidate Visa Dossier Documents (Passport, GAMCA, PCC, Trade, Demand, Photos)
 // @route   PUT /api/leads/:id/visa-documents
 // @access  Private (Visa Manager / Admin)
